@@ -5,7 +5,7 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
 from aiogram.types import Message
-from aiogram.utils import executor
+import asyncio
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -99,6 +99,15 @@ async def handle_text(message: Message):
 
 # ============= ЗАПУСК =============
 
-if __name__ == '__main__':
+async def main():
+    """Главная функция запуска"""
     logger.info("🚀 Запуск бота в режиме polling...")
-    executor.start_polling(dp, skip_updates=True)
+    
+    # Удаляем предыдущие вебхуки (если были)
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Запускаем polling
+    await dp.start_polling(bot)
+
+if __name__ == '__main__':
+    asyncio.run(main())

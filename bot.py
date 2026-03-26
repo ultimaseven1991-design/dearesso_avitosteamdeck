@@ -1,13 +1,10 @@
 import os
 import logging
-import asyncio
 from flask import Flask, request, jsonify
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import WebhookInfo
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web
+import asyncio
 
 # Настройка логирования
 logging.basicConfig(
@@ -33,12 +30,12 @@ bot = Bot(
 )
 dp = Dispatcher()
 
-# Flask приложение (только для health check)
+# Flask приложение
 app = Flask(__name__)
 
 # ============= ОБРАБОТЧИКИ КОМАНД =============
 
-@dp.message_handler(commands=['start'])
+@dp.message(commands=['start'])
 async def cmd_start(message: types.Message):
     """Обработчик команды /start"""
     user_name = message.from_user.first_name
@@ -50,7 +47,7 @@ async def cmd_start(message: types.Message):
     )
     await message.reply(welcome_text)
 
-@dp.message_handler(commands=['help'])
+@dp.message(commands=['help'])
 async def cmd_help(message: types.Message):
     """Обработчик команды /help"""
     help_text = (
@@ -64,7 +61,7 @@ async def cmd_help(message: types.Message):
     )
     await message.reply(help_text)
 
-@dp.message_handler(commands=['search'])
+@dp.message(commands=['search'])
 async def cmd_search(message: types.Message):
     """Обработчик команды /search"""
     await message.reply(
@@ -76,7 +73,7 @@ async def cmd_search(message: types.Message):
         "И я найду актуальные объявления!"
     )
 
-@dp.message_handler(commands=['settings'])
+@dp.message(commands=['settings'])
 async def cmd_settings(message: types.Message):
     """Обработчик команды /settings"""
     await message.reply(
@@ -88,7 +85,7 @@ async def cmd_settings(message: types.Message):
         "Скоро появятся дополнительные настройки!"
     )
 
-@dp.message_handler(content_types=['text'])
+@dp.message()
 async def handle_text(message: types.Message):
     """Обработчик текстовых сообщений (поиск по ключевым словам)"""
     search_query = message.text.strip()
@@ -121,14 +118,29 @@ def index():
         "webhook_url": WEBHOOK_URL
     })
 
+@app.route(WEBHOOK_PATH, methods=['POST'])
+async def webhook():
+    """Эндпоинт для получения обновлений от Telegram"""
+    try:
+        update_data = await request.get_json()
+        if not update_data:
+            return jsonify({"ok": False, "error": "Empty update"}), 400
+        
+        update = types.Update(**update_data)
+        await dp.process_update(update)
+        return jsonify({"ok": True})
+    except Exception as e:
+        logger.error(f"Ошибка при обработке webhook: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 @app.route('/health', methods=['GET'])
 def health():
     """Health check для Render"""
     return jsonify({"status": "healthy"}), 200
 
-# ============= ЗАПУСК С AIOHTTP =============
+# ============= ЗАПУСК =============
 
-async def on_startup():
+async def setup_webhook():
     """Установка webhook при запуске"""
     try:
         await bot.delete_webhook()
@@ -137,28 +149,32 @@ async def on_startup():
     except Exception as e:
         logger.error(f"❌ Ошибка установки webhook: {e}")
 
-async def on_shutdown():
-    """Остановка бота"""
-    logger.info("🛑 Останавливаем бота...")
-    await bot.delete_webhook()
-    await bot.session.close()
-
-def run_aiohttp_app():
-    """Запуск aiohttp сервера для webhook"""
-    # Создаем aiohttp приложение
-    aiohttp_app = web.Application()
+async def main():
+    """Главная функция запуска"""
+    await setup_webhook()
     
-    # Настраиваем webhook обработчик
-    webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
-    webhook_handler.register(aiohttp_app, path=WEBHOOK_PATH)
+    # Запускаем Flask с asyncio
+    from hypercorn.asyncio import serve
+    from hypercorn.config import Config
     
-    # Настраиваем startup/shutdown
-    aiohttp_app.on_startup.append(lambda app: on_startup())
-    aiohttp_app.on_shutdown.append(lambda app: on_shutdown())
+    config = Config()
+    config.bind = [f"0.0.0.0:{PORT}"]
     
-    # Запускаем сервер
-    web.run_app(aiohttp_app, host='0.0.0.0', port=PORT)
+    # Создаем ASGI приложение для Flask
+    from asgiref.wsgi import WsgiToAsgi
+    asgi_app = WsgiToAsgi(app)
+    
+    # Добавляем обработчик webhook в Flask маршруты
+    @app.route(WEBHOOK_PATH, methods=['POST'])
+    async def webhook():
+        update_data = await request.get_json()
+        if update_data:
+            update = types.Update(**update_data)
+            await dp.process_update(update)
+        return "ok"
+    
+    logger.info(f"🚀 Запуск сервера на порту {PORT}")
+    await serve(asgi_app, config)
 
 if __name__ == '__main__':
-    # Запускаем aiohttp сервер (он будет обрабатывать webhook)
-    run_aiohttp_app()
+    asyncio.run(main())

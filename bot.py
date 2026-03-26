@@ -1,147 +1,228 @@
-﻿import os
-import time
+import os
+import logging
+import asyncio
+from flask import Flask, request, jsonify
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import WebhookInfo
+from aiogram.contrib.middlewares.logging import LoggingMiddleware
 import json
-import hashlib
-import threading
-import requests
-from bs4 import BeautifulSoup
-from flask import Flask
-from telegram import Bot
 
-# ========== НАСТРОЙКИ ==========
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")  # Токен от @BotFather
-CHAT_ID = os.getenv("CHAT_ID")                # Ваш ID чата
-AVITO_URL = os.getenv("AVITO_URL")            # Ссылка на поиск на Avito
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-# Файл для сохранения отправленных объявлений
-SENT_ADS_FILE = "sent_ads.json"
+# Конфигурация
+API_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # Токен из переменных окружения Render
+if not API_TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN не установлен в переменных окружения")
+
+# Настройки webhook
+WEBHOOK_PATH = "/webhook"
+PORT = int(os.getenv("PORT", 10000))
+BASE_URL = os.getenv("RENDER_EXTERNAL_URL", f"https://localhost:{PORT}")
+WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
+
+# Инициализация бота и диспетчера
+bot = Bot(token=API_TOKEN, parse_mode=types.ParseMode.HTML)
+dp = Dispatcher(bot)
+dp.middleware.setup(LoggingMiddleware())
 
 # Flask приложение
 app = Flask(__name__)
-bot = Bot(token=TELEGRAM_TOKEN)
-sent_ads = set()
 
-# ========== ФУНКЦИИ ==========
+# ============= ОБРАБОТЧИКИ КОМАНД =============
 
-def load_sent_ads():
-    """Загружает ID отправленных объявлений"""
-    global sent_ads
+@dp.message_handler(commands=['start'])
+async def cmd_start(message: types.Message):
+    """Обработчик команды /start"""
+    user_name = message.from_user.first_name
+    welcome_text = (
+        f"👋 Привет, {user_name}!\n\n"
+        f"🤖 Я бот для поиска объявлений на Avito\n"
+        f"📱 Помогаю находить Steam Deck и другие товары\n\n"
+        f"🔍 Используй команду /help чтобы узнать что я умею"
+    )
+    await message.reply(welcome_text)
+
+@dp.message_handler(commands=['help'])
+async def cmd_help(message: types.Message):
+    """Обработчик команды /help"""
+    help_text = (
+        "📋 <b>Доступные команды:</b>\n\n"
+        "/start - Запустить бота\n"
+        "/help - Показать это сообщение\n"
+        "/search - Начать поиск объявлений\n"
+        "/settings - Настройки поиска\n\n"
+        "💡 <b>Совет:</b> Просто отправь мне название товара, "
+        "и я начну поиск на Avito!"
+    )
+    await message.reply(help_text, parse_mode='HTML')
+
+@dp.message_handler(commands=['search'])
+async def cmd_search(message: types.Message):
+    """Обработчик команды /search"""
+    await message.reply(
+        "🔍 <b>Что ищем?</b>\n\n"
+        "Отправьте мне название товара, например:\n"
+        "• Steam Deck\n"
+        "• Nintendo Switch\n"
+        "• PlayStation 5\n\n"
+        "И я найду актуальные объявления!",
+        parse_mode='HTML'
+    )
+
+@dp.message_handler(commands=['settings'])
+async def cmd_settings(message: types.Message):
+    """Обработчик команды /settings"""
+    await message.reply(
+        "⚙️ <b>Настройки</b>\n\n"
+        "Сейчас доступны:\n"
+        "• Город: вся Россия\n"
+        "• Цена: любая\n"
+        "• Сортировка: по дате\n\n"
+        "Скоро появятся дополнительные настройки!",
+        parse_mode='HTML'
+    )
+
+@dp.message_handler(content_types=['text'])
+async def handle_text(message: types.Message):
+    """Обработчик текстовых сообщений (поиск по ключевым словам)"""
+    search_query = message.text.strip()
+    
+    if len(search_query) < 3:
+        await message.reply(
+            "❌ Слишком короткий запрос!\n"
+            "Введите минимум 3 символа для поиска."
+        )
+        return
+    
+    # Отправляем индикатор набора текста
+    await bot.send_chat_action(message.chat.id, 'typing')
+    
+    # Здесь будет логика поиска на Avito
+    # Пока что демо-ответ
+    await message.reply(
+        f"🔍 <b>Ищу: {search_query}</b>\n\n"
+        f"⏳ Поиск на Avito...\n\n"
+        f"✨ <i>Скоро здесь появятся результаты!</i>",
+        parse_mode='HTML'
+    )
+    
+    # TODO: Добавить реальный парсинг Avito
+    # await search_avito(search_query, message.chat.id)
+
+# ============= ОБРАБОТЧИКИ ОШИБОК =============
+
+@dp.errors_handler()
+async def errors_handler(update, exception):
+    """Глобальный обработчик ошибок"""
+    logger.error(f"Ошибка: {exception}")
+    return True
+
+# ============= FLASK ЭНДПОИНТЫ =============
+
+@app.route('/', methods=['GET'])
+def index():
+    """Проверка, что бот работает"""
+    return jsonify({
+        "status": "ok",
+        "message": "Telegram bot is running",
+        "webhook_url": WEBHOOK_URL
+    })
+
+@app.route(WEBHOOK_PATH, methods=['POST'])
+async def webhook():
+    """Эндпоинт для получения обновлений от Telegram"""
     try:
-        with open(SENT_ADS_FILE, "r") as f:
-            sent_ads = set(json.load(f))
-    except:
-        sent_ads = set()
-
-def save_sent_ads():
-    """Сохраняет ID отправленных объявлений"""
-    with open(SENT_ADS_FILE, "w") as f:
-        json.dump(list(sent_ads), f)
-
-def check_avito():
-    """Проверяет Avito и возвращает новые объявления"""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }
-    
-    try:
-        response = requests.get(AVITO_URL, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
+        # Получаем JSON данные
+        update_data = await request.get_json()
         
-        new_ads = []
-        items = soup.find_all('div', {'data-marker': 'item'})
+        if not update_data:
+            logger.warning("Получен пустой update")
+            return jsonify({"ok": False, "error": "Empty update"}), 400
         
-        for item in items[:5]:
-            try:
-                # Название и ссылка
-                title_elem = item.find('a', {'data-marker': 'item-title'})
-                if not title_elem:
-                    continue
-                
-                title = title_elem.get_text(strip=True)
-                link = title_elem.get('href')
-                if link and not link.startswith('http'):
-                    link = f"https://www.avito.ru{link}"
-                
-                # Цена
-                price_elem = item.find('span', {'data-marker': 'item-price'})
-                price = price_elem.get_text(strip=True) if price_elem else "Цена не указана"
-                
-                # Уникальный ID
-                ad_id = hashlib.md5(f"{title}{link}".encode()).hexdigest()
-                
-                # Если объявление новое
-                if ad_id not in sent_ads:
-                    new_ads.append({
-                        'id': ad_id,
-                        'title': title,
-                        'price': price,
-                        'link': link
-                    })
-                    sent_ads.add(ad_id)
-                    
-            except:
-                continue
+        # Конвертируем в объект Update
+        update = types.Update(**update_data)
         
-        if new_ads:
-            save_sent_ads()
-            
-        return new_ads
+        # Обрабатываем обновление
+        await dp.process_update(update)
         
-    except:
-        return []
-
-def send_to_telegram(ad):
-    """Отправляет объявление в Telegram"""
-    message = f"""🆕 НОВОЕ ОБЪЯВЛЕНИЕ!
-
-{ad['title']}
-
-💰 {ad['price']}
-
-🔗 {ad['link']}"""
-    
-    bot.send_message(chat_id=CHAT_ID, text=message)
-
-# ========== ЗАПУСК МОНИТОРИНГА ==========
-
-def monitor():
-    """Бесконечный цикл проверки"""
-    load_sent_ads()
-    
-    # Приветствие при запуске
-    try:
-        bot.send_message(chat_id=CHAT_ID, text="✅ Бот запущен")
-    except:
-        pass
-    
-    while True:
-        print(f"[{time.strftime('%H:%M:%S')}] Проверка...")
+        return jsonify({"ok": True})
         
-        new_ads = check_avito()
-        
-        for ad in new_ads:
-            print(f"Найдено: {ad['title']}")
-            send_to_telegram(ad)
-            time.sleep(1)
-        
-        time.sleep(60)  # Проверка каждую минуту
+    except Exception as e:
+        logger.error(f"Ошибка при обработке webhook: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
-# ========== ВЕБ-СЕРВЕР ДЛЯ UPTIMEROBOT ==========
-
-@app.route('/')
+@app.route('/health', methods=['GET'])
 def health():
-    return "OK", 200
+    """Health check для Render"""
+    return jsonify({"status": "healthy"}), 200
 
-def start_web():
-    """Запускает веб-сервер"""
-    port = int(os.getenv("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+# ============= ФУНКЦИИ ДЛЯ WEBHOOK =============
 
-# ========== ТОЧКА ВХОДА ==========
+async def setup_webhook():
+    """Установка webhook при запуске"""
+    try:
+        # Получаем информацию о текущем webhook
+        webhook_info = await bot.get_webhook_info()
+        logger.info(f"Текущий webhook: {webhook_info.url}")
+        
+        # Если webhook уже установлен на другой URL, удаляем
+        if webhook_info.url and webhook_info.url != WEBHOOK_URL:
+            logger.info("Удаляем старый webhook...")
+            await bot.delete_webhook()
+        
+        # Устанавливаем новый webhook
+        await bot.set_webhook(
+            url=WEBHOOK_URL,
+            max_connections=40,
+            allowed_updates=["message", "callback_query"]
+        )
+        
+        logger.info(f"✅ Webhook успешно установлен: {WEBHOOK_URL}")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при установке webhook: {e}")
+        raise
 
-if __name__ == "__main__":
-    # Запускаем веб-сервер в фоне
-    threading.Thread(target=start_web, daemon=True).start()
+async def on_startup():
+    """Действия при запуске приложения"""
+    logger.info("🚀 Запуск Telegram бота...")
+    await setup_webhook()
+    logger.info("✅ Бот готов к работе!")
+
+async def on_shutdown():
+    """Действия при остановке приложения"""
+    logger.info("🛑 Остановка бота...")
+    await bot.delete_webhook()
+    await bot.session.close()
+    logger.info("✅ Бот остановлен")
+
+# ============= ЗАПУСК ПРИЛОЖЕНИЯ =============
+
+if __name__ == '__main__':
+    # Создаем цикл событий
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
-    # Запускаем мониторинг
-    monitor()
+    # Запускаем startup функции
+    loop.run_until_complete(on_startup())
+    
+    try:
+        # Запускаем Flask сервер
+        logger.info(f"🔥 Запуск Flask сервера на порту {PORT}")
+        app.run(
+            host='0.0.0.0',
+            port=PORT,
+            debug=False,
+            threaded=True
+        )
+    except KeyboardInterrupt:
+        logger.info("Получен сигнал остановки")
+    finally:
+        # Останавливаем бота
+        loop.run_until_complete(on_shutdown())
+        loop.close()

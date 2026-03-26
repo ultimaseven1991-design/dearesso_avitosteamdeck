@@ -1,5 +1,8 @@
 import os
 import logging
+import asyncio
+import threading
+from flask import Flask, jsonify
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
@@ -14,7 +17,9 @@ logger = logging.getLogger(__name__)
 # Конфигурация
 API_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not API_TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN не установлен в переменных окружения")
+    raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
+
+PORT = int(os.getenv("PORT", 10000))
 
 # Инициализация бота
 bot = Bot(
@@ -23,11 +28,31 @@ bot = Bot(
 )
 dp = Dispatcher()
 
+# Flask приложение для health check
+app = Flask(__name__)
+
+@app.route('/', methods=['GET'])
+def index():
+    """Health check endpoint для Render"""
+    return jsonify({
+        "status": "ok",
+        "message": "Telegram bot is running"
+    })
+
+@app.route('/health', methods=['GET'])
+def health():
+    """Альтернативный health check"""
+    return jsonify({"status": "healthy"}), 200
+
+def run_http_server():
+    """Запуск HTTP сервера в отдельном потоке"""
+    logger.info(f"🌐 Запуск HTTP сервера на порту {PORT}")
+    app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
+
 # ============= ОБРАБОТЧИКИ КОМАНД =============
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    """Обработчик команды /start"""
     user_name = message.from_user.first_name
     welcome_text = (
         f"👋 Привет, {user_name}!\n\n"
@@ -39,7 +64,6 @@ async def cmd_start(message: Message):
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
-    """Обработчик команды /help"""
     help_text = (
         "📋 <b>Доступные команды:</b>\n\n"
         "/start - Запустить бота\n"
@@ -53,7 +77,6 @@ async def cmd_help(message: Message):
 
 @dp.message(Command("search"))
 async def cmd_search(message: Message):
-    """Обработчик команды /search"""
     await message.reply(
         "🔍 <b>Что ищем?</b>\n\n"
         "Отправьте мне название товара, например:\n"
@@ -65,7 +88,6 @@ async def cmd_search(message: Message):
 
 @dp.message(Command("settings"))
 async def cmd_settings(message: Message):
-    """Обработчик команды /settings"""
     await message.reply(
         "⚙️ <b>Настройки</b>\n\n"
         "Сейчас доступны:\n"
@@ -77,7 +99,6 @@ async def cmd_settings(message: Message):
 
 @dp.message()
 async def handle_text(message: Message):
-    """Обработчик всех текстовых сообщений (поиск по ключевым словам)"""
     search_query = message.text.strip()
     
     if len(search_query) < 3:
@@ -87,10 +108,7 @@ async def handle_text(message: Message):
         )
         return
     
-    # Отправляем индикатор набора текста
     await bot.send_chat_action(message.chat.id, 'typing')
-    
-    # Здесь будет логика поиска на Avito
     await message.reply(
         f"🔍 <b>Ищу: {search_query}</b>\n\n"
         f"⏳ Поиск на Avito...\n\n"
@@ -99,15 +117,26 @@ async def handle_text(message: Message):
 
 # ============= ЗАПУСК =============
 
-async def main():
-    """Главная функция запуска"""
-    logger.info("🚀 Запуск бота в режиме polling...")
-    
-    # Удаляем предыдущие вебхуки (если были)
+async def run_bot():
+    """Запуск Telegram бота в режиме polling"""
+    logger.info("🚀 Запуск Telegram бота в режиме polling...")
     await bot.delete_webhook(drop_pending_updates=True)
-    
-    # Запускаем polling
     await dp.start_polling(bot)
 
+def main():
+    """Главная функция: запускает HTTP сервер в потоке и бота в основном потоке"""
+    # Запускаем HTTP сервер в отдельном потоке
+    http_thread = threading.Thread(target=run_http_server, daemon=True)
+    http_thread.start()
+    logger.info("✅ HTTP сервер запущен в фоновом потоке")
+    
+    # Запускаем бота в основном потоке (asyncio)
+    try:
+        asyncio.run(run_bot())
+    except KeyboardInterrupt:
+        logger.info("🛑 Бот остановлен пользователем")
+    except Exception as e:
+        logger.error(f"❌ Ошибка при запуске бота: {e}")
+
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()

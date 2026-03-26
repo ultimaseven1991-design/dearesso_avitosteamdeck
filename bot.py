@@ -1,27 +1,20 @@
 import os
 import logging
-from flask import Flask, request, jsonify
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-import asyncio
+from aiogram.filters import Command
+from aiogram.types import Message
+from aiogram.utils import executor
 
 # Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Конфигурация
 API_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not API_TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
-
-WEBHOOK_PATH = "/webhook"
-PORT = int(os.getenv("PORT", 10000))
-BASE_URL = os.getenv("RENDER_EXTERNAL_URL", f"https://localhost:{PORT}")
-WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
+    raise ValueError("TELEGRAM_BOT_TOKEN не установлен в переменных окружения")
 
 # Инициализация бота
 bot = Bot(
@@ -30,13 +23,10 @@ bot = Bot(
 )
 dp = Dispatcher()
 
-# Flask приложение
-app = Flask(__name__)
-
 # ============= ОБРАБОТЧИКИ КОМАНД =============
 
-@dp.message(commands=['start'])
-async def cmd_start(message: types.Message):
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
     """Обработчик команды /start"""
     user_name = message.from_user.first_name
     welcome_text = (
@@ -47,8 +37,8 @@ async def cmd_start(message: types.Message):
     )
     await message.reply(welcome_text)
 
-@dp.message(commands=['help'])
-async def cmd_help(message: types.Message):
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
     """Обработчик команды /help"""
     help_text = (
         "📋 <b>Доступные команды:</b>\n\n"
@@ -61,8 +51,8 @@ async def cmd_help(message: types.Message):
     )
     await message.reply(help_text)
 
-@dp.message(commands=['search'])
-async def cmd_search(message: types.Message):
+@dp.message(Command("search"))
+async def cmd_search(message: Message):
     """Обработчик команды /search"""
     await message.reply(
         "🔍 <b>Что ищем?</b>\n\n"
@@ -73,8 +63,8 @@ async def cmd_search(message: types.Message):
         "И я найду актуальные объявления!"
     )
 
-@dp.message(commands=['settings'])
-async def cmd_settings(message: types.Message):
+@dp.message(Command("settings"))
+async def cmd_settings(message: Message):
     """Обработчик команды /settings"""
     await message.reply(
         "⚙️ <b>Настройки</b>\n\n"
@@ -86,8 +76,8 @@ async def cmd_settings(message: types.Message):
     )
 
 @dp.message()
-async def handle_text(message: types.Message):
-    """Обработчик текстовых сообщений (поиск по ключевым словам)"""
+async def handle_text(message: Message):
+    """Обработчик всех текстовых сообщений (поиск по ключевым словам)"""
     search_query = message.text.strip()
     
     if len(search_query) < 3:
@@ -107,74 +97,8 @@ async def handle_text(message: types.Message):
         f"✨ <i>Скоро здесь появятся результаты!</i>"
     )
 
-# ============= FLASK ЭНДПОИНТЫ =============
-
-@app.route('/', methods=['GET'])
-def index():
-    """Проверка, что бот работает"""
-    return jsonify({
-        "status": "ok",
-        "message": "Telegram bot is running",
-        "webhook_url": WEBHOOK_URL
-    })
-
-@app.route(WEBHOOK_PATH, methods=['POST'])
-async def webhook():
-    """Эндпоинт для получения обновлений от Telegram"""
-    try:
-        update_data = await request.get_json()
-        if not update_data:
-            return jsonify({"ok": False, "error": "Empty update"}), 400
-        
-        update = types.Update(**update_data)
-        await dp.process_update(update)
-        return jsonify({"ok": True})
-    except Exception as e:
-        logger.error(f"Ошибка при обработке webhook: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-@app.route('/health', methods=['GET'])
-def health():
-    """Health check для Render"""
-    return jsonify({"status": "healthy"}), 200
-
 # ============= ЗАПУСК =============
 
-async def setup_webhook():
-    """Установка webhook при запуске"""
-    try:
-        await bot.delete_webhook()
-        await bot.set_webhook(WEBHOOK_URL, allowed_updates=["message", "callback_query"])
-        logger.info(f"✅ Webhook установлен: {WEBHOOK_URL}")
-    except Exception as e:
-        logger.error(f"❌ Ошибка установки webhook: {e}")
-
-async def main():
-    """Главная функция запуска"""
-    await setup_webhook()
-    
-    # Запускаем Flask с asyncio
-    from hypercorn.asyncio import serve
-    from hypercorn.config import Config
-    
-    config = Config()
-    config.bind = [f"0.0.0.0:{PORT}"]
-    
-    # Создаем ASGI приложение для Flask
-    from asgiref.wsgi import WsgiToAsgi
-    asgi_app = WsgiToAsgi(app)
-    
-    # Добавляем обработчик webhook в Flask маршруты
-    @app.route(WEBHOOK_PATH, methods=['POST'])
-    async def webhook():
-        update_data = await request.get_json()
-        if update_data:
-            update = types.Update(**update_data)
-            await dp.process_update(update)
-        return "ok"
-    
-    logger.info(f"🚀 Запуск сервера на порту {PORT}")
-    await serve(asgi_app, config)
-
 if __name__ == '__main__':
-    asyncio.run(main())
+    logger.info("🚀 Запуск бота в режиме polling...")
+    executor.start_polling(dp, skip_updates=True)
